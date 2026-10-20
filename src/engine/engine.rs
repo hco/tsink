@@ -203,6 +203,7 @@ struct RuntimeConfigState {
     cardinality_limit: usize,
     wal_size_limit_bytes: u64,
     admission_poll_interval: Duration,
+    compaction_interval: Duration,
 }
 
 /// Memory-accounting counters and backpressure coordination.

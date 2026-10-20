@@ -68,6 +68,7 @@ impl StartupFinalizePhase {
         }
 
         if actions.start_background_threads {
+            storage.start_background_compaction_thread()?;
             storage.start_background_flush_thread(DEFAULT_FLUSH_INTERVAL)?;
             storage.start_background_persisted_refresh_thread()?;
             storage.start_background_rollup_thread(DEFAULT_ROLLUP_INTERVAL)?;

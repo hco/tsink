@@ -7,7 +7,8 @@ use super::super::tiering::{
     PersistedSegmentTier, SegmentInventory, SegmentInventoryEntry, SegmentLaneFamily,
 };
 use super::discovery::{StartupDiscoveryPhase, StartupInventoryState};
-use super::finalize::{RegistryPersistenceAction, StartupFinalizeState};
+use super::finalize::{RegistryPersistenceAction, StartupFinalizePhase, StartupFinalizeState};
+use super::hydrate::StartupHydrationPhase;
 use super::planning::StartupPlanningPhase;
 use super::recovery::StartupRecoveryPhase;
 use super::wal_open::StartupWalOpenPhase;
@@ -84,6 +85,53 @@ fn build_storage_recovers_rows_from_preexisting_data_path() {
         vec![DataPoint::new(1, 1.0)]
     );
     reopened.close().unwrap();
+}
+
+#[test]
+fn compaction_starts_only_after_startup_finishes() {
+    // Compaction during hydration replaced segments that the registry
+    // checkpoint at the end of startup still read, so opening failed with
+    // ENOENT when replaying a large WAL took longer than a compaction interval.
+    let temp_dir = TempDir::new().unwrap();
+    let builder = startup_builder(temp_dir.path());
+    let plan = StartupPlanningPhase::prepare(&builder).unwrap();
+    let discovered = StartupDiscoveryPhase::discover(&builder, &plan).unwrap();
+    let recovered = StartupRecoveryPhase::recover(&plan, discovered).unwrap();
+    let finalize_state = recovered.finalize_state();
+    let replay_highwater = recovered.loaded_segments().wal_replay_highwater;
+    let next_segment_id = recovered.loaded_segments().next_segment_id;
+    let wal = StartupWalOpenPhase::open(&builder, &plan, replay_highwater).unwrap();
+    let storage_options = plan.storage_options().clone();
+    let paths = plan.paths().clone();
+    let runtime_inputs = plan.into_runtime_inputs();
+    assert!(runtime_inputs.background_threads_enabled);
+
+    let storage = StartupHydrationPhase::create_storage(
+        builder.chunk_points(),
+        storage_options,
+        &paths,
+        next_segment_id,
+        wal,
+    )
+    .unwrap();
+    StartupHydrationPhase::hydrate(
+        storage.as_ref(),
+        &builder,
+        recovered,
+        runtime_inputs.data_path_process_lock,
+    )
+    .unwrap();
+    assert!(storage.background.compaction_thread.lock().is_none());
+
+    StartupFinalizePhase::run(
+        &storage,
+        finalize_state,
+        runtime_inputs.background_threads_enabled,
+        runtime_inputs.background_fail_fast,
+    )
+    .unwrap();
+    assert!(storage.background.compaction_thread.lock().is_some());
+    storage.close().unwrap();
 }
 
 #[test]

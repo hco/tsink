@@ -137,6 +137,7 @@ impl StorageStateAssembly {
             cardinality_limit: options.cardinality_limit,
             wal_size_limit_bytes: options.wal_size_limit_bytes,
             admission_poll_interval: options.admission_poll_interval,
+            compaction_interval: options.compaction_interval,
         }
     }
 

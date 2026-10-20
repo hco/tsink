@@ -7,13 +7,18 @@ use crate::engine::segment::StartupQuarantinedSegment;
 pub(super) struct StartupHydrationPhase;
 
 impl StartupHydrationPhase {
+    /// Compaction starts with the other background threads in the finalize
+    /// phase: segments it replaces during hydration would still be listed in
+    /// the persisted index that finalize checkpoints.
     pub(super) fn create_storage(
         chunk_points: usize,
-        storage_options: ChunkStorageOptions,
+        mut storage_options: ChunkStorageOptions,
         paths: &config::StoragePathLayout,
         next_segment_id: u64,
         wal: Option<FramedWal>,
     ) -> Result<Arc<ChunkStorage>> {
+        // Only the compaction thread starts during construction.
+        storage_options.background_threads_enabled = false;
         Ok(Arc::new(ChunkStorage::new_with_data_path_and_options(
             chunk_points,
             wal,
