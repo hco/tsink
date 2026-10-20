@@ -222,7 +222,8 @@ impl FramedWal {
         );
         let _ = old_writer.into_parts();
         writer.get_ref().sync_data()?;
-        drop(writer);
+        // Keep holding the writer lock until the published highwater marker is
+        // written: appends write the same temporary marker file under this lock.
 
         let reset_result = (|| -> Result<()> {
             for segment in collect_wal_segment_files(&self.dir)? {
@@ -255,6 +256,7 @@ impl FramedWal {
         self.mark_published_through(reset_highwater);
         self.mark_durable_through(reset_highwater);
         *self.last_sync.lock() = Instant::now();
+        drop(writer);
         Ok(())
     }
 
