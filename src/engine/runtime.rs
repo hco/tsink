@@ -107,6 +107,10 @@ impl<'a> BackgroundWorkerControl<'a> {
     }
 }
 
+/// Upper bound for compaction passes in one background run, so a run cannot
+/// hold the compaction gate for an unbounded time.
+const MAX_COMPACTION_PASSES_PER_RUN: usize = 64;
+
 struct FlushWorkerSchedule {
     interval: Duration,
     next_bounded_flush_at: Instant,
@@ -272,19 +276,16 @@ impl ChunkStorage {
                     compaction_interval,
                     || Self::lock_compaction_gate(compaction_lock.as_ref()),
                     || {
-                        match Self::compact_compactors_with_changes(
+                        Self::compact_until_caught_up(
                             numeric_compactor.as_ref(),
                             blob_compactor.as_ref(),
-                            Some(observability.as_ref()),
-                        ) {
-                            Ok(changes) if !changes.is_empty() => {
+                            observability.as_ref(),
+                            lifecycle.as_ref(),
+                            |changes| {
                                 pending_persisted_segment_diff.lock().merge(changes);
                                 persisted_index_dirty.store(true, Ordering::SeqCst);
-                            }
-                            Ok(_) => {}
-                            Err(err) => return Err(err),
-                        }
-                        Ok(())
+                            },
+                        )
                     },
                 ) {
                     BackgroundWorkerFlow::Continue | BackgroundWorkerFlow::Pause(_) => {}
@@ -293,6 +294,33 @@ impl ChunkStorage {
             })?;
 
         Ok(Some(handle))
+    }
+
+    /// Runs compaction passes until nothing is left to merge or the storage
+    /// starts closing. One pass merges a single window of segments, and steady
+    /// writes add segments faster than one pass per interval removes them.
+    pub(super) fn compact_until_caught_up(
+        numeric_compactor: Option<&Compactor>,
+        blob_compactor: Option<&Compactor>,
+        observability: &StorageObservabilityCounters,
+        lifecycle: &AtomicU8,
+        mut publish: impl FnMut(PendingPersistedSegmentDiff),
+    ) -> Result<()> {
+        for _ in 0..MAX_COMPACTION_PASSES_PER_RUN {
+            let changes = Self::compact_compactors_with_changes(
+                numeric_compactor,
+                blob_compactor,
+                Some(observability),
+            )?;
+            if changes.is_empty() {
+                break;
+            }
+            publish(changes);
+            if lifecycle.load(Ordering::SeqCst) != STORAGE_OPEN {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn spawn_background_flush_thread(

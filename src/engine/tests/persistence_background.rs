@@ -3775,3 +3775,44 @@ fn flush_interval_controls_how_often_partial_heads_become_segments() {
         "no partial head is persisted before the interval elapses",
     );
 }
+
+#[test]
+fn background_compaction_run_catches_up_with_a_backlog() {
+    let temp_dir = TempDir::new().unwrap();
+    let lane_path = temp_dir.path().join(NUMERIC_LANE_ROOT);
+    let labels = vec![Label::new("host", "a")];
+    let registry = SeriesRegistry::new();
+    let series_id = registry
+        .resolve_or_insert("background_compaction_backlog", &labels)
+        .unwrap()
+        .series_id;
+    // A backlog like steady writes leave behind: many small level-0
+    // segments, more than one pass (one window) merges.
+    for segment_id in 1..=64u64 {
+        write_numeric_segment_to_path(
+            &lane_path,
+            &registry,
+            series_id,
+            0,
+            segment_id,
+            &[(segment_id as i64, segment_id as f64)],
+        );
+    }
+    let storage = new_raw_numeric_storage(lane_path.clone(), 65);
+
+    let mut published = 0usize;
+    ChunkStorage::compact_until_caught_up(
+        storage.persisted.numeric_compactor.as_ref(),
+        None,
+        storage.observability.as_ref(),
+        storage.coordination.lifecycle.as_ref(),
+        |_| published += 1,
+    )
+    .unwrap();
+
+    // 64 level-0 segments take 16 passes into level 1, then 4 into level 2.
+    assert!(published >= 20, "{published} passes");
+    assert!(load_segments_for_level(&lane_path, 0).unwrap().is_empty());
+    assert!(load_segments_for_level(&lane_path, 1).unwrap().is_empty());
+    storage.close().unwrap();
+}
