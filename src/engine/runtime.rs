@@ -274,9 +274,11 @@ impl ChunkStorage {
                     &control,
                     "compaction",
                     compaction_interval,
-                    || Self::lock_compaction_gate(compaction_lock.as_ref()),
+                    // compact_until_caught_up takes the gate for each pass.
+                    || (),
                     || {
                         Self::compact_until_caught_up(
+                            compaction_lock.as_ref(),
                             numeric_compactor.as_ref(),
                             blob_compactor.as_ref(),
                             observability.as_ref(),
@@ -299,7 +301,12 @@ impl ChunkStorage {
     /// Runs compaction passes until nothing is left to merge or the storage
     /// starts closing. One pass merges a single window of segments, and steady
     /// writes add segments faster than one pass per interval removes them.
+    ///
+    /// Each pass holds the compaction gate while it replaces segments and
+    /// publishes the change, and releases it in between so flushes and
+    /// persisted refreshes are not held up for the whole run.
     pub(super) fn compact_until_caught_up(
+        compaction_lock: &Mutex<()>,
         numeric_compactor: Option<&Compactor>,
         blob_compactor: Option<&Compactor>,
         observability: &StorageObservabilityCounters,
@@ -307,6 +314,7 @@ impl ChunkStorage {
         mut publish: impl FnMut(PendingPersistedSegmentDiff),
     ) -> Result<()> {
         for _ in 0..MAX_COMPACTION_PASSES_PER_RUN {
+            let _compaction_guard = Self::lock_compaction_gate(compaction_lock);
             let changes = Self::compact_compactors_with_changes(
                 numeric_compactor,
                 blob_compactor,

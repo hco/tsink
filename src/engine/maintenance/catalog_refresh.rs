@@ -143,10 +143,10 @@ impl ChunkStorage {
     }
 
     pub(in super::super) fn refresh_dirty_persisted_segments_claimed(&self) -> Result<()> {
-        if self.apply_known_dirty_persisted_refresh_if_pending()? {
-            return Ok(());
-        }
-
+        // Known changes are applied under the compaction gate only. Without
+        // it, a flush that holds the gate could find the changes already
+        // taken but not yet published, persist the registry catalog from the
+        // stale index, and fail on segments compaction had already removed.
         let _compaction_guard = self.compaction_gate();
         if self.apply_known_dirty_persisted_refresh_if_pending()? {
             return Ok(());

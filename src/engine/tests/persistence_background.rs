@@ -3802,6 +3802,7 @@ fn background_compaction_run_catches_up_with_a_backlog() {
 
     let mut published = 0usize;
     ChunkStorage::compact_until_caught_up(
+        storage.coordination.compaction_lock.as_ref(),
         storage.persisted.numeric_compactor.as_ref(),
         None,
         storage.observability.as_ref(),
@@ -3815,4 +3816,54 @@ fn background_compaction_run_catches_up_with_a_backlog() {
     assert!(load_segments_for_level(&lane_path, 0).unwrap().is_empty());
     assert!(load_segments_for_level(&lane_path, 1).unwrap().is_empty());
     storage.close().unwrap();
+}
+
+#[test]
+fn persisted_refresh_applies_known_changes_only_under_the_compaction_gate() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let temp_dir = TempDir::new().unwrap();
+    let lane_path = temp_dir.path().join(NUMERIC_LANE_ROOT);
+    let storage = new_raw_numeric_storage(lane_path.clone(), 2);
+    let registry = SeriesRegistry::new();
+    let series_id = registry
+        .resolve_or_insert("refresh_gate", &[Label::new("host", "a")])
+        .unwrap()
+        .series_id;
+    // A segment written behind the index's back, as compaction does.
+    let root = write_numeric_segment_to_path(&lane_path, &registry, series_id, 0, 1, &[(1, 1.0)]);
+    storage
+        .persisted
+        .pending_persisted_segment_diff
+        .lock()
+        .record_changes([root.clone()], []);
+    storage
+        .persisted
+        .persisted_index_dirty
+        .store(true, Ordering::SeqCst);
+
+    let refreshed = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let gate = storage.compaction_gate();
+        scope.spawn(|| {
+            storage
+                .sync_persisted_segments_from_disk_if_dirty()
+                .unwrap();
+            refreshed.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !refreshed.load(Ordering::SeqCst),
+            "refresh applied known changes while compaction held the gate",
+        );
+        drop(gate);
+    });
+
+    assert!(refreshed.load(Ordering::SeqCst));
+    assert!(storage
+        .persisted
+        .persisted_index
+        .read()
+        .segments_by_root
+        .contains_key(&root));
 }
