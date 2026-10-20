@@ -36,27 +36,37 @@ impl Compactor {
         let source_level = level_to_u8(source);
         let target_level = level_to_u8(target);
 
-        if count_level_segments_for_compaction(&self.data_path, source_level)? < 2 {
+        // Planning only needs manifests. Loading every segment of the level
+        // with its chunks here made each pass read the whole level into
+        // memory, which grows without bound while compaction lags behind.
+        let mut candidates = scan_level_for_compaction(&self.data_path, source_level)?;
+        if candidates.len() < 2 {
             return Ok(None);
         }
 
-        let mut segments = load_segments_for_level_runtime_strict(&self.data_path, source_level)?;
-        if segments.len() < 2 {
-            return Ok(None);
-        }
+        candidates.sort_by_key(|candidate| candidate.manifest.segment_id);
 
-        segments.sort_by_key(|segment| segment.manifest.segment_id);
-
-        let should_compact = segments.len() >= count_trigger || has_time_overlap(&segments);
+        let should_compact = candidates.len() >= count_trigger || has_time_overlap(&candidates);
         if !should_compact {
             return Ok(None);
         }
 
         let window =
-            select_compaction_window(&segments, count_trigger, DEFAULT_SOURCE_WINDOW_SEGMENTS);
+            select_compaction_window(&candidates, count_trigger, DEFAULT_SOURCE_WINDOW_SEGMENTS);
         if window.len() < 2 {
             return Ok(None);
         }
+
+        let roots = window
+            .iter()
+            .map(|candidate| candidate.root.clone())
+            .collect::<Vec<_>>();
+        let loaded = load_segment_dirs_runtime_strict(&roots)?;
+        if loaded.len() != roots.len() {
+            // A segment disappeared since the scan; plan again next pass.
+            return Ok(None);
+        }
+        let window = loaded.iter().collect::<Vec<_>>();
 
         let mut outcome = self.compact_segments(target_level, &window, tombstones)?;
         outcome.stats.compacted = true;
@@ -66,9 +76,18 @@ impl Compactor {
     }
 }
 
-pub(super) fn count_level_segments_for_compaction(base: &Path, level: u8) -> Result<usize> {
+/// A segment considered for compaction, known by its manifest only.
+pub(super) struct CompactionCandidate {
+    root: PathBuf,
+    manifest: SegmentManifest,
+}
+
+pub(super) fn scan_level_for_compaction(
+    base: &Path,
+    level: u8,
+) -> Result<Vec<CompactionCandidate>> {
     let expected_level_dir = format!("L{level}");
-    let mut count = 0usize;
+    let mut candidates = Vec::new();
 
     for root in list_segment_dirs(base)? {
         if root
@@ -92,7 +111,7 @@ pub(super) fn count_level_segments_for_compaction(base: &Path, level: u8) -> Res
                         ),
                     ));
                 }
-                count = count.saturating_add(1);
+                candidates.push(CompactionCandidate { root, manifest });
             }
             Err(err) if is_not_found_error(&err) => continue,
             Err(TsinkError::DataCorruption(details)) => {
@@ -106,10 +125,10 @@ pub(super) fn count_level_segments_for_compaction(base: &Path, level: u8) -> Res
         }
     }
 
-    Ok(count)
+    Ok(candidates)
 }
 
-pub(super) fn has_time_overlap(segments: &[LoadedSegment]) -> bool {
+pub(super) fn has_time_overlap(segments: &[CompactionCandidate]) -> bool {
     let mut ranges = segments
         .iter()
         .filter_map(|segment| {
@@ -139,10 +158,10 @@ pub(super) fn has_time_overlap(segments: &[LoadedSegment]) -> bool {
 }
 
 pub(super) fn select_compaction_window(
-    segments: &[LoadedSegment],
+    segments: &[CompactionCandidate],
     count_trigger: usize,
     max_segments: usize,
-) -> Vec<&LoadedSegment> {
+) -> Vec<&CompactionCandidate> {
     let max_segments = max_segments.max(2);
     if let Some(indexes) = overlapping_window_indexes(segments, max_segments) {
         return indexes
@@ -164,7 +183,7 @@ struct SegmentTimeRange {
 }
 
 fn overlapping_window_indexes(
-    segments: &[LoadedSegment],
+    segments: &[CompactionCandidate],
     max_segments: usize,
 ) -> Option<Vec<usize>> {
     let mut ranges = segments

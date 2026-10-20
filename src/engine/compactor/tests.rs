@@ -479,3 +479,51 @@ fn make_histogram_chunk(series_id: u64, timestamps: &[i64]) -> Chunk {
         wal_highwater: WalHighWatermark::default(),
     }
 }
+
+#[test]
+fn compaction_reads_only_the_segments_it_merges() {
+    let temp_dir = TempDir::new().unwrap();
+    let registry = SeriesRegistry::new();
+    let series_id = registry
+        .resolve_or_insert("cpu", &[Label::new("host", "a")])
+        .unwrap()
+        .series_id;
+
+    // Six L0 segments without time overlap; a pass merges the first four.
+    for segment_id in 1..=6u64 {
+        let ts = segment_id as i64 * 100;
+        let mut chunks = HashMap::new();
+        chunks.insert(
+            series_id,
+            vec![make_numeric_chunk(series_id, &[(ts, 1.0), (ts + 10, 2.0)])],
+        );
+        SegmentWriter::new(temp_dir.path(), 0, segment_id)
+            .unwrap()
+            .write_segment(&registry, &chunks)
+            .unwrap();
+    }
+
+    // A pass used to load the chunks of every segment in the level, so a
+    // segment outside the window failed it (and with a large backlog, the
+    // whole level had to fit in memory).
+    let last = crate::engine::segment::list_segment_dirs(temp_dir.path())
+        .unwrap()
+        .into_iter()
+        .find(|root| root.ends_with(format!("seg-{:016x}", 6)))
+        .unwrap();
+    fs::write(last.join("chunks.bin"), b"not a chunks file").unwrap();
+
+    // As in the storage engine, which allocates segment ids itself.
+    let compactor =
+        Compactor::new_with_segment_id_allocator(temp_dir.path(), 8, Arc::new(AtomicU64::new(7)));
+    assert!(compactor.compact_once().unwrap());
+
+    assert_eq!(
+        load_segments_for_level(temp_dir.path(), 0).unwrap().len(),
+        1
+    );
+    let l1 = load_segments_for_level(temp_dir.path(), 1).unwrap();
+    assert_eq!(l1.len(), 1);
+    assert_eq!(l1[0].manifest.min_ts, Some(100));
+    assert_eq!(l1[0].manifest.max_ts, Some(410));
+}

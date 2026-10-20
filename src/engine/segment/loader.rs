@@ -342,15 +342,26 @@ pub fn load_segments_for_level(base: impl AsRef<Path>, level: u8) -> Result<Vec<
     load_segments_for_level_with_policy(base, level, SegmentLoadPolicy::SkipInvalid)
 }
 
-pub(crate) fn load_segments_for_level_runtime_strict(
-    base: impl AsRef<Path>,
-    level: u8,
-) -> Result<Vec<LoadedSegment>> {
-    load_segments_for_level_with_policy(
-        base,
-        level,
-        SegmentLoadPolicy::FailOnInvalid(SegmentValidationContext::Compaction),
-    )
+/// Loads the given segment directories for compaction, skipping directories
+/// that disappeared since they were listed.
+pub(crate) fn load_segment_dirs_runtime_strict(dirs: &[PathBuf]) -> Result<Vec<LoadedSegment>> {
+    let mut out = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        if let Some(segment) = load_segment_dir_with_policy(
+            dir,
+            SegmentLoadPolicy::FailOnInvalid(SegmentValidationContext::Compaction),
+            "Segment directory disappeared before compaction; skipping",
+            "Ignoring invalid segment directory",
+        )? {
+            out.push(LoadedSegment {
+                root: segment.root,
+                manifest: segment.manifest,
+                series: segment.series,
+                chunks_by_series: segment.chunks_by_series,
+            });
+        }
+    }
+    Ok(out)
 }
 
 fn load_segments_for_level_with_policy(
