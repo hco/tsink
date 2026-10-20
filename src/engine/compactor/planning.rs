@@ -23,6 +23,12 @@ impl Compactor {
             return Ok(outcome);
         }
 
+        if let Some(outcome) =
+            self.try_merge_small_segments(CompactionLevel::L2, self.l1_trigger, &tombstones)?
+        {
+            return Ok(outcome);
+        }
+
         Ok(CompactionOutcome::default())
     }
 
@@ -34,7 +40,6 @@ impl Compactor {
         tombstones: &TombstoneMap,
     ) -> Result<Option<CompactionOutcome>> {
         let source_level = level_to_u8(source);
-        let target_level = level_to_u8(target);
 
         // Planning only needs manifests. Loading every segment of the level
         // with its chunks here made each pass read the whole level into
@@ -53,9 +58,52 @@ impl Compactor {
 
         let window =
             select_compaction_window(&candidates, count_trigger, DEFAULT_SOURCE_WINDOW_SEGMENTS);
+        self.compact_window(source, target, &window, tombstones)
+    }
+
+    /// Merges a run of small segments within the last level into one.
+    ///
+    /// Nothing compacts the last level further, so without this every level-1
+    /// compaction leaves another small segment behind and the number of
+    /// segments grows with the age of the data.
+    fn try_merge_small_segments(
+        &self,
+        level: CompactionLevel,
+        count_trigger: usize,
+        tombstones: &TombstoneMap,
+    ) -> Result<Option<CompactionOutcome>> {
+        let mut candidates = scan_level_for_compaction(&self.data_path, level_to_u8(level))?;
+        if candidates.len() < count_trigger.max(2) {
+            return Ok(None);
+        }
+
+        candidates.sort_by_key(|candidate| {
+            (
+                candidate.manifest.min_ts.unwrap_or(i64::MIN),
+                candidate.manifest.segment_id,
+            )
+        });
+        let window = select_small_segment_window(
+            &candidates,
+            count_trigger,
+            DEFAULT_SOURCE_WINDOW_SEGMENTS,
+            self.output_segment_point_budget(),
+        );
+        self.compact_window(level, level, &window, tombstones)
+    }
+
+    fn compact_window(
+        &self,
+        source: CompactionLevel,
+        target: CompactionLevel,
+        window: &[&CompactionCandidate],
+        tombstones: &TombstoneMap,
+    ) -> Result<Option<CompactionOutcome>> {
         if window.len() < 2 {
             return Ok(None);
         }
+        let source_level = level_to_u8(source);
+        let target_level = level_to_u8(target);
 
         let roots = window
             .iter()
@@ -155,6 +203,43 @@ pub(super) fn has_time_overlap(segments: &[CompactionCandidate]) -> bool {
     }
 
     false
+}
+
+/// Returns the oldest run of at least `count_trigger` adjacent segments that
+/// are each smaller than half an output segment, cut to at most `max_segments`
+/// and to what fits into one output segment. Merging only small segments keeps
+/// rewriting the same data to a few times over its lifetime.
+pub(super) fn select_small_segment_window(
+    segments: &[CompactionCandidate],
+    count_trigger: usize,
+    max_segments: usize,
+    output_point_budget: usize,
+) -> Vec<&CompactionCandidate> {
+    let is_small =
+        |segment: &CompactionCandidate| segment.manifest.point_count < output_point_budget / 2;
+    let min_run = count_trigger.max(2);
+
+    let mut start = 0usize;
+    while start < segments.len() {
+        let run_len = segments[start..]
+            .iter()
+            .take_while(|segment| is_small(segment))
+            .count();
+        if run_len >= min_run {
+            let mut points = 0usize;
+            return segments[start..start + run_len]
+                .iter()
+                .take(max_segments.max(2))
+                .take_while(|segment| {
+                    points = points.saturating_add(segment.manifest.point_count);
+                    points <= output_point_budget
+                })
+                .collect();
+        }
+        start += run_len.max(1);
+    }
+
+    Vec::new()
 }
 
 pub(super) fn select_compaction_window(

@@ -527,3 +527,92 @@ fn compaction_reads_only_the_segments_it_merges() {
     assert_eq!(l1[0].manifest.min_ts, Some(100));
     assert_eq!(l1[0].manifest.max_ts, Some(410));
 }
+
+fn write_level2_segment(
+    data_path: &std::path::Path,
+    registry: &SeriesRegistry,
+    series_id: u64,
+    segment_id: u64,
+    timestamps: std::ops::Range<i64>,
+) {
+    let points = timestamps.map(|ts| (ts, ts as f64)).collect::<Vec<_>>();
+    let mut chunks = HashMap::new();
+    chunks.insert(series_id, vec![make_numeric_chunk(series_id, &points)]);
+    SegmentWriter::new(data_path, 2, segment_id)
+        .unwrap()
+        .write_segment(registry, &chunks)
+        .unwrap();
+}
+
+#[test]
+fn compactor_merges_small_last_level_segments() {
+    let temp_dir = TempDir::new().unwrap();
+    let registry = SeriesRegistry::new();
+    let series_id = registry
+        .resolve_or_insert("cpu", &[Label::new("host", "a")])
+        .unwrap()
+        .series_id;
+    for segment_id in 1..=6u64 {
+        let start = segment_id as i64 * 10;
+        write_level2_segment(
+            temp_dir.path(),
+            &registry,
+            series_id,
+            segment_id,
+            start..start + 3,
+        );
+    }
+
+    let compactor = Compactor::new(temp_dir.path(), 8);
+    assert!(compactor.compact_once().unwrap());
+
+    let l2 = load_segments_for_level(temp_dir.path(), 2).unwrap();
+    assert_eq!(l2.len(), 1);
+    assert_eq!(l2[0].manifest.point_count, 18);
+    assert!(!compactor.compact_once().unwrap());
+}
+
+#[test]
+fn compactor_leaves_large_last_level_segments_alone() {
+    let temp_dir = TempDir::new().unwrap();
+    let registry = SeriesRegistry::new();
+    let series_id = registry
+        .resolve_or_insert("cpu", &[Label::new("host", "a")])
+        .unwrap()
+        .series_id;
+    // point cap 1: an output segment holds 512 points, small is below 256.
+    // Two small segments, a large one, then four small ones in time order.
+    write_level2_segment(temp_dir.path(), &registry, series_id, 1, 0..10);
+    write_level2_segment(temp_dir.path(), &registry, series_id, 2, 10..20);
+    write_level2_segment(temp_dir.path(), &registry, series_id, 3, 20..320);
+    for segment_id in 4..=7u64 {
+        let start = 320 + (segment_id as i64 - 4) * 10;
+        write_level2_segment(
+            temp_dir.path(),
+            &registry,
+            series_id,
+            segment_id,
+            start..start + 10,
+        );
+    }
+
+    let compactor = Compactor::new(temp_dir.path(), 1);
+    assert!(compactor.compact_once().unwrap());
+    assert!(!compactor.compact_once().unwrap());
+
+    let mut l2 = load_segments_for_level(temp_dir.path(), 2)
+        .unwrap()
+        .into_iter()
+        .map(|segment| (segment.manifest.min_ts, segment.manifest.point_count))
+        .collect::<Vec<_>>();
+    l2.sort();
+    assert_eq!(
+        l2,
+        vec![
+            (Some(0), 10),
+            (Some(10), 10),
+            (Some(20), 300),
+            (Some(320), 40)
+        ]
+    );
+}

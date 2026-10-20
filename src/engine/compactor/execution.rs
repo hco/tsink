@@ -268,10 +268,7 @@ impl Compactor {
             )?;
         }
 
-        let output_segment_point_budget = self
-            .point_cap
-            .saturating_mul(DEFAULT_OUTPUT_SEGMENT_CHUNK_MULTIPLIER)
-            .max(self.point_cap);
+        let output_segment_point_budget = self.output_segment_point_budget();
         let mut pending_chunks = HashMap::<SeriesId, Vec<Chunk>>::new();
         let mut pending_points = 0usize;
         let mut emitted_segments = 0usize;
@@ -377,6 +374,13 @@ impl Compactor {
             source_roots,
             output_roots,
         })
+    }
+
+    /// Points after which a compaction output is split into another segment.
+    pub(super) fn output_segment_point_budget(&self) -> usize {
+        self.point_cap
+            .saturating_mul(DEFAULT_OUTPUT_SEGMENT_CHUNK_MULTIPLIER)
+            .max(self.point_cap)
     }
 
     fn flush_compacted_segment(
