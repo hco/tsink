@@ -39,6 +39,7 @@ pub(super) struct ChunkStorageOptions {
     pub(super) wal_size_limit_bytes: u64,
     pub(super) admission_poll_interval: Duration,
     pub(super) compaction_interval: Duration,
+    pub(super) flush_interval: Duration,
     pub(super) background_threads_enabled: bool,
     pub(super) background_fail_fast: bool,
     pub(super) metadata_shard_count: Option<u32>,
@@ -78,6 +79,7 @@ impl Default for ChunkStorageOptions {
             wal_size_limit_bytes: u64::MAX,
             admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
             compaction_interval: DEFAULT_COMPACTION_INTERVAL,
+            flush_interval: DEFAULT_FLUSH_INTERVAL,
             background_threads_enabled: true,
             background_fail_fast: true,
             metadata_shard_count: None,
@@ -162,6 +164,7 @@ impl From<&StorageBuilder> for ChunkStorageOptions {
             wal_size_limit_bytes: builder.wal_size_limit_bytes().min(u64::MAX as usize) as u64,
             admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
             compaction_interval: DEFAULT_COMPACTION_INTERVAL,
+            flush_interval: builder.flush_interval(),
             background_threads_enabled: {
                 let enabled = has_data_path || needs_compute_only_refresh_worker;
                 #[cfg(test)]

@@ -462,6 +462,7 @@ fn background_flush_seals_rotated_partition_before_reaching_chunk_cap() {
             wal_size_limit_bytes: u64::MAX,
             admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
             compaction_interval: DEFAULT_COMPACTION_INTERVAL,
+            flush_interval: DEFAULT_FLUSH_INTERVAL,
             background_threads_enabled: true,
             background_fail_fast: false,
             metadata_shard_count: None,

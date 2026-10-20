@@ -552,6 +552,15 @@ impl AsyncStorageBuilder {
         self
     }
 
+    /// Sets how often the background flush seals in-memory points into a new segment.
+    ///
+    /// The underlying storage builder defaults to 250 ms.
+    #[must_use]
+    pub fn with_flush_interval(mut self, interval: Duration) -> Self {
+        self.inner = self.inner.with_flush_interval(interval);
+        self
+    }
+
     #[must_use]
     pub fn with_partition_duration(mut self, duration: Duration) -> Self {
         self.inner = self.inner.with_partition_duration(duration);

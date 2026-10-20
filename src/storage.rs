@@ -1007,6 +1007,7 @@ pub struct StorageBuilder {
     chunk_points: usize,
     max_writers: usize,
     write_timeout: Duration,
+    flush_interval: Duration,
     partition_duration: Duration,
     max_active_partition_heads_per_series: usize,
     memory_limit_bytes: usize,
@@ -1041,6 +1042,7 @@ impl Default for StorageBuilder {
             chunk_points: DEFAULT_CHUNK_POINTS,
             max_writers: crate::cgroup::default_workers_limit(),
             write_timeout: Duration::from_secs(30),
+            flush_interval: Duration::from_millis(250),
             partition_duration: Duration::from_secs(3600),
             max_active_partition_heads_per_series: DEFAULT_MAX_ACTIVE_PARTITION_HEADS_PER_SERIES,
             memory_limit_bytes: usize::MAX,
@@ -1168,6 +1170,17 @@ impl StorageBuilder {
     #[must_use]
     pub fn with_write_timeout(mut self, timeout: Duration) -> Self {
         self.write_timeout = timeout;
+        self
+    }
+
+    /// Sets how often the background flush seals in-memory points into a new segment.
+    ///
+    /// Every flush that finds unflushed points writes a level-0 segment, so steady writes
+    /// create one segment per interval. Unflushed points stay queryable and are covered by
+    /// the WAL. Defaults to 250 ms.
+    #[must_use]
+    pub fn with_flush_interval(mut self, interval: Duration) -> Self {
+        self.flush_interval = interval.max(Duration::from_millis(1));
         self
     }
 
@@ -1341,6 +1354,10 @@ impl StorageBuilder {
 
     pub(crate) fn write_timeout(&self) -> Duration {
         self.write_timeout
+    }
+
+    pub(crate) fn flush_interval(&self) -> Duration {
+        self.flush_interval
     }
 
     pub(crate) fn partition_duration(&self) -> Duration {

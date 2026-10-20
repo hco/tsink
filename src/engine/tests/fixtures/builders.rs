@@ -33,6 +33,7 @@ pub(in crate::engine::storage_engine::tests) fn base_storage_test_options(
         wal_size_limit_bytes: u64::MAX,
         admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
         compaction_interval: DEFAULT_COMPACTION_INTERVAL,
+        flush_interval: DEFAULT_FLUSH_INTERVAL,
         background_threads_enabled: false,
         background_fail_fast: false,
         metadata_shard_count: None,

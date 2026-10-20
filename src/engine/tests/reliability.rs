@@ -321,6 +321,7 @@ fn background_compaction_failures_fence_new_work_by_default() {
             retention_enforced: false,
             background_threads_enabled: true,
             compaction_interval: Duration::from_secs(60),
+            flush_interval: DEFAULT_FLUSH_INTERVAL,
             ..ChunkStorageOptions::default()
         },
     )

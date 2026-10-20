@@ -24,7 +24,8 @@ pub(super) use tempfile::TempDir;
 pub(super) use super::bootstrap::merge_loaded_segment_indexes;
 pub(super) use super::{
     ChunkStorage, ChunkStorageOptions, BLOB_LANE_ROOT, DEFAULT_ADMISSION_POLL_INTERVAL,
-    DEFAULT_COMPACTION_INTERVAL, NUMERIC_LANE_ROOT, SERIES_INDEX_FILE_NAME, WAL_DIR_NAME,
+    DEFAULT_COMPACTION_INTERVAL, DEFAULT_FLUSH_INTERVAL, NUMERIC_LANE_ROOT, SERIES_INDEX_FILE_NAME,
+    WAL_DIR_NAME,
 };
 pub(super) use crate::engine::chunk::{
     Chunk, ChunkHeader, ChunkPoint, TimestampCodecId, ValueCodecId, ValueLane,

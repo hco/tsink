@@ -104,6 +104,7 @@ fn background_compaction_reduces_l0_segments_while_storage_is_open() {
             wal_size_limit_bytes: u64::MAX,
             admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
             compaction_interval: Duration::from_millis(25),
+            flush_interval: DEFAULT_FLUSH_INTERVAL,
             background_threads_enabled: true,
             background_fail_fast: false,
             metadata_shard_count: None,
@@ -187,6 +188,7 @@ fn background_compaction_refreshes_persisted_index_in_background() {
                 wal_size_limit_bytes: u64::MAX,
                 admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
                 compaction_interval: Duration::from_millis(25),
+                flush_interval: DEFAULT_FLUSH_INTERVAL,
                 background_threads_enabled: true,
                 background_fail_fast: false,
                 metadata_shard_count: None,
@@ -312,6 +314,7 @@ fn flush_pipeline_reconciles_known_dirty_compaction_changes_before_checkpointing
         ChunkStorageOptions {
             retention_enforced: false,
             compaction_interval: Duration::from_millis(25),
+            flush_interval: DEFAULT_FLUSH_INTERVAL,
             background_threads_enabled: true,
             ..ChunkStorageOptions::default()
         },
@@ -1711,6 +1714,7 @@ fn remote_catalog_refresh_keeps_concurrent_queries_running() {
                 wal_size_limit_bytes: u64::MAX,
                 admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
                 compaction_interval: DEFAULT_COMPACTION_INTERVAL,
+                flush_interval: DEFAULT_FLUSH_INTERVAL,
                 background_threads_enabled: false,
                 background_fail_fast: false,
                 metadata_shard_count: None,
@@ -1865,6 +1869,7 @@ fn remote_catalog_refresh_uses_shared_catalog_without_full_inventory_scans() {
             wal_size_limit_bytes: u64::MAX,
             admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
             compaction_interval: DEFAULT_COMPACTION_INTERVAL,
+            flush_interval: DEFAULT_FLUSH_INTERVAL,
             background_threads_enabled: false,
             background_fail_fast: false,
             metadata_shard_count: None,
@@ -2362,6 +2367,7 @@ fn flush_pipeline_completes_while_another_writer_permit_is_held() {
             wal_size_limit_bytes: u64::MAX,
             admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
             compaction_interval: DEFAULT_COMPACTION_INTERVAL,
+            flush_interval: DEFAULT_FLUSH_INTERVAL,
             background_threads_enabled: false,
             background_fail_fast: false,
             metadata_shard_count: None,
@@ -2866,6 +2872,7 @@ fn flush_pipeline_runs_steady_state_post_flush_maintenance_without_full_inventor
                 wal_size_limit_bytes: u64::MAX,
                 admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
                 compaction_interval: DEFAULT_COMPACTION_INTERVAL,
+                flush_interval: DEFAULT_FLUSH_INTERVAL,
                 background_threads_enabled: false,
                 background_fail_fast: false,
                 metadata_shard_count: None,
@@ -2981,6 +2988,7 @@ fn background_post_flush_maintenance_applies_known_dirty_diff_before_inventory_s
                 wal_size_limit_bytes: u64::MAX,
                 admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
                 compaction_interval: DEFAULT_COMPACTION_INTERVAL,
+                flush_interval: DEFAULT_FLUSH_INTERVAL,
                 background_threads_enabled: false,
                 background_fail_fast: false,
                 metadata_shard_count: None,
@@ -3116,6 +3124,7 @@ fn background_post_flush_maintenance_stage_does_not_block_queries() {
                 wal_size_limit_bytes: u64::MAX,
                 admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
                 compaction_interval: DEFAULT_COMPACTION_INTERVAL,
+                flush_interval: DEFAULT_FLUSH_INTERVAL,
                 background_threads_enabled: false,
                 background_fail_fast: false,
                 metadata_shard_count: None,
@@ -3272,6 +3281,7 @@ fn background_post_flush_maintenance_syncs_registry_catalog_after_tier_move() {
             wal_size_limit_bytes: u64::MAX,
             admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
             compaction_interval: DEFAULT_COMPACTION_INTERVAL,
+            flush_interval: DEFAULT_FLUSH_INTERVAL,
             background_threads_enabled: false,
             background_fail_fast: false,
             metadata_shard_count: None,
@@ -3366,6 +3376,7 @@ fn flush_pipeline_returns_while_background_post_flush_maintenance_is_staged() {
                 wal_size_limit_bytes: u64::MAX,
                 admission_poll_interval: DEFAULT_ADMISSION_POLL_INTERVAL,
                 compaction_interval: DEFAULT_COMPACTION_INTERVAL,
+                flush_interval: DEFAULT_FLUSH_INTERVAL,
                 background_threads_enabled: false,
                 background_fail_fast: false,
                 metadata_shard_count: None,
@@ -3705,4 +3716,62 @@ fn close_waits_for_inflight_background_refresh_before_final_persist() {
         .is_ok());
     close_thread.join().unwrap();
     assert!(scan_calls.load(Ordering::SeqCst) >= 1);
+}
+
+fn level0_segment_count(data_path: &std::path::Path) -> usize {
+    std::fs::read_dir(
+        data_path
+            .join(NUMERIC_LANE_ROOT)
+            .join("segments")
+            .join("L0"),
+    )
+    .map_or(0, |dir| dir.count())
+}
+
+fn write_and_count_level0_segments(flush_interval: Option<Duration>) -> usize {
+    let temp_dir = TempDir::new().unwrap();
+    let mut builder = StorageBuilder::new()
+        .with_data_path(temp_dir.path())
+        .with_timestamp_precision(TimestampPrecision::Seconds);
+    if let Some(interval) = flush_interval {
+        builder = builder.with_flush_interval(interval);
+    }
+    let storage = builder.build().unwrap();
+    let labels = vec![Label::new("host", "a")];
+
+    for ts in 1..=8 {
+        storage
+            .insert_rows(&[Row::with_labels(
+                "flush_interval_probe",
+                labels.clone(),
+                DataPoint::new(ts, ts as f64),
+            )])
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    let segments = level0_segment_count(temp_dir.path());
+    assert_eq!(
+        storage
+            .select("flush_interval_probe", &labels, 0, 10)
+            .unwrap()
+            .len(),
+        8,
+        "unflushed points stay queryable",
+    );
+    storage.close().unwrap();
+    segments
+}
+
+#[test]
+fn flush_interval_controls_how_often_partial_heads_become_segments() {
+    assert!(
+        write_and_count_level0_segments(None) > 0,
+        "the default interval persists partial heads within a second",
+    );
+    assert_eq!(
+        write_and_count_level0_segments(Some(Duration::from_secs(3600))),
+        0,
+        "no partial head is persisted before the interval elapses",
+    );
 }
