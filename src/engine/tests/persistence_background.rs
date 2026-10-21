@@ -3867,3 +3867,107 @@ fn persisted_refresh_applies_known_changes_only_under_the_compaction_gate() {
         .segments_by_root
         .contains_key(&root));
 }
+
+#[test]
+fn compaction_cannot_merge_a_flush_segment_before_the_flush_publishes_it() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+
+    let temp_dir = TempDir::new().unwrap();
+    let labels = vec![Label::new("host", "a")];
+    let storage = Arc::new(
+        ChunkStorage::new_with_data_path_and_options(
+            2,
+            None,
+            Some(temp_dir.path().join(NUMERIC_LANE_ROOT)),
+            None,
+            1,
+            ChunkStorageOptions {
+                timestamp_precision: TimestampPrecision::Milliseconds,
+                retention_enforced: false,
+                background_threads_enabled: false,
+                ..ChunkStorageOptions::default()
+            },
+        )
+        .unwrap(),
+    );
+    let insert_and_flush = |timestamp: i64| {
+        storage
+            .insert_rows(&[Row::with_labels(
+                "flush_compaction_race",
+                labels.clone(),
+                DataPoint::new(timestamp, timestamp as f64),
+            )])
+            .unwrap();
+        storage.flush_pipeline_once()
+    };
+    // Three level-0 segments; the next flush reaches the compaction trigger.
+    for timestamp in 1..=3 {
+        insert_and_flush(timestamp).unwrap();
+    }
+
+    // Right after the flush wrote its segment, compaction runs as the
+    // background thread would. The hook gives it time to finish but does not
+    // wait for it, so a compaction blocked by the flush cannot deadlock.
+    let (compacted_tx, compacted_rx) = mpsc::channel();
+    let compaction_started = AtomicBool::new(false);
+    let compaction_thread = Arc::new(std::sync::Mutex::new(None));
+    storage.set_persist_post_publish_hook({
+        let storage = Arc::downgrade(&storage);
+        let compaction_thread = Arc::clone(&compaction_thread);
+        move |_| {
+            if compaction_started.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let storage = storage.upgrade().unwrap();
+            let compacted_tx = compacted_tx.clone();
+            *compaction_thread.lock().unwrap() = Some(thread::spawn(move || {
+                let result = ChunkStorage::compact_until_caught_up(
+                    storage.coordination.compaction_lock.as_ref(),
+                    storage.persisted.numeric_compactor.as_ref(),
+                    None,
+                    storage.observability.as_ref(),
+                    storage.coordination.lifecycle.as_ref(),
+                    |changes| {
+                        storage
+                            .persisted
+                            .pending_persisted_segment_diff
+                            .lock()
+                            .merge(changes);
+                        storage
+                            .persisted
+                            .persisted_index_dirty
+                            .store(true, Ordering::SeqCst);
+                    },
+                );
+                compacted_tx.send(result).unwrap();
+            }));
+            thread::sleep(Duration::from_millis(500));
+        }
+    });
+
+    let flush_result = insert_and_flush(4);
+    storage.clear_persist_post_publish_hook();
+    compaction_thread
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .join()
+        .unwrap();
+    compacted_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+
+    flush_result.expect("flush failed after compaction merged its segment");
+    storage
+        .sync_persisted_segments_from_disk_if_dirty()
+        .unwrap();
+    let points = storage
+        .select("flush_compaction_race", &labels, 0, 10)
+        .unwrap();
+    assert_eq!(points.len(), 4);
+    storage.close().unwrap();
+}

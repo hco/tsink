@@ -338,7 +338,7 @@ impl ChunkStorage {
         // Recovery metadata must reach disk before the newly published segment roots are
         // allowed to become the engine's durable view. If this step fails, roll the new
         // roots back rather than exposing data that restart cannot fully recover.
-        let _compaction_guard = self.compaction_gate();
+        // The caller holds the compaction gate.
         if publish_ctx.0.load(Ordering::SeqCst) {
             if let Err(err) = self.apply_known_dirty_persisted_refresh_if_pending() {
                 tracing::warn!(
@@ -514,6 +514,10 @@ impl ChunkStorage {
                 wal: self.persisted.wal.as_ref(),
             };
             let publish_ctx = FlushPublishContext(&self.persisted.persisted_index_dirty);
+            // Compaction picks segments from disk. Without the gate it could
+            // merge and delete a segment this flush just wrote before the
+            // flush publishes it, and the flush then fails with ENOENT.
+            let compaction_guard = self.compaction_gate();
             let Some(staged_flush) = self.stage_flush_segment_publication(snapshot_ctx)? else {
                 return Ok(PersistSegmentOutcome::default());
             };
@@ -533,6 +537,7 @@ impl ChunkStorage {
                 verified_flush,
                 planned_dirty_refresh,
             )?;
+            drop(compaction_guard);
             self.reset_flush_wal_stage(snapshot_ctx, wal_highwater)?;
             Ok(outcome)
         })();
