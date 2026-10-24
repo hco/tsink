@@ -616,3 +616,44 @@ fn compactor_leaves_large_last_level_segments_alone() {
         ]
     );
 }
+
+#[test]
+fn compaction_keeps_chunks_within_partitions() {
+    // A backfill of old points next to live writes: each flush writes one
+    // chunk per partition, and merging must not join them into one chunk
+    // that spans from the old points to the live ones. Such a chunk overlaps
+    // every query in between.
+    let temp_dir = TempDir::new().unwrap();
+    let registry = SeriesRegistry::new();
+    let series_id = registry
+        .resolve_or_insert("cpu", &[Label::new("host", "a")])
+        .unwrap()
+        .series_id;
+
+    for (segment_id, old, live) in [(1, [10, 20], [1000, 1010]), (2, [30, 40], [1020, 1030])] {
+        let mut chunks = HashMap::new();
+        chunks.insert(
+            series_id,
+            vec![
+                make_numeric_chunk(series_id, &[(old[0], 1.0), (old[1], 1.0)]),
+                make_numeric_chunk(series_id, &[(live[0], 2.0), (live[1], 2.0)]),
+            ],
+        );
+        SegmentWriter::new(temp_dir.path(), 0, segment_id)
+            .unwrap()
+            .write_segment(&registry, &chunks)
+            .unwrap();
+    }
+
+    let compactor = Compactor::new(temp_dir.path(), 8).with_partition_window(100);
+    compactor.compact_once().unwrap();
+
+    let loaded = load_segments(temp_dir.path()).unwrap();
+    let chunks = loaded.chunks_by_series.get(&series_id).unwrap();
+    let mut ranges = chunks
+        .iter()
+        .map(|chunk| (chunk.header.min_ts, chunk.header.max_ts))
+        .collect::<Vec<_>>();
+    ranges.sort();
+    assert_eq!(ranges, vec![(10, 40), (1000, 1030)]);
+}

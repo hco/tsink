@@ -82,6 +82,7 @@ pub struct Compactor {
     l0_trigger: usize,
     l1_trigger: usize,
     next_segment_id: Option<Arc<AtomicU64>>,
+    partition_window: Option<i64>,
 }
 
 impl Compactor {
@@ -92,6 +93,7 @@ impl Compactor {
             l0_trigger: DEFAULT_L0_TRIGGER,
             l1_trigger: DEFAULT_L1_TRIGGER,
             next_segment_id: None,
+            partition_window: None,
         }
     }
 
@@ -106,7 +108,14 @@ impl Compactor {
             l0_trigger: DEFAULT_L0_TRIGGER,
             l1_trigger: DEFAULT_L1_TRIGGER,
             next_segment_id: Some(next_segment_id),
+            partition_window: None,
         }
+    }
+
+    /// Cuts merged chunks at partition boundaries, as ingestion does.
+    pub fn with_partition_window(mut self, partition_window: i64) -> Self {
+        self.partition_window = Some(partition_window.max(1));
+        self
     }
 
     pub fn compact_once(&self) -> Result<bool> {

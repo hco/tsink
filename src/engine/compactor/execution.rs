@@ -287,6 +287,7 @@ impl Compactor {
                     series_id,
                     chunks,
                     self.point_cap,
+                    self.partition_window,
                     tombstone_ranges,
                     retention_cutoff,
                     |chunk| {
@@ -442,6 +443,7 @@ fn stream_merge_series_chunks<F>(
     series_id: SeriesId,
     chunks: &[&Chunk],
     point_cap: usize,
+    partition_window: Option<i64>,
     tombstone_ranges: Option<&[TombstoneRange]>,
     retention_cutoff: Option<i64>,
     mut emit_chunk: F,
@@ -474,7 +476,7 @@ where
         return Ok(());
     }
 
-    let mut chunk_points = Vec::with_capacity(point_cap);
+    let mut chunk_points: Vec<ChunkPoint> = Vec::with_capacity(point_cap);
     let mut last_emitted_point: Option<ChunkPoint> = None;
 
     while let Some(key) = heap.pop() {
@@ -510,6 +512,17 @@ where
         }
         if retention_cutoff.is_some_and(|cutoff| point.ts < cutoff) {
             continue;
+        }
+
+        // Points arrive in timestamp order, so a new partition starts a new
+        // chunk; a chunk spanning partitions would overlap every query
+        // between its first and last point.
+        if let (Some(window), Some(first)) = (partition_window, chunk_points.first()) {
+            // Same partition ids as ingestion (`partition_id_for_timestamp`).
+            if point.ts.div_euclid(window) != first.ts.div_euclid(window) {
+                let points = std::mem::replace(&mut chunk_points, Vec::with_capacity(point_cap));
+                emit_chunk(encode_compacted_chunk(series_id, lane, points)?)?;
+            }
         }
 
         last_emitted_point = Some(point.clone());

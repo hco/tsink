@@ -75,6 +75,7 @@ impl ChunkStorage {
                 chunk_point_cap,
                 Arc::clone(&next_segment_id),
             )
+            .with_partition_window(options.partition_window)
         });
         let blob_compactor = blob_lane_path.map(|path| {
             Compactor::new_with_segment_id_allocator(
@@ -82,6 +83,7 @@ impl ChunkStorage {
                 chunk_point_cap,
                 Arc::clone(&next_segment_id),
             )
+            .with_partition_window(options.partition_window)
         });
         let lifecycle = Arc::new(AtomicU8::new(STORAGE_OPEN));
         let compaction_lock = Arc::new(Mutex::new(()));
